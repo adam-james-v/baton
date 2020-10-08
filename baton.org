@@ -1,0 +1,298 @@
+* ;;
+#+Title: baton
+#+SUBTITLE: a collection of components for building apps
+#+AUTHOR: adam-james
+#+STARTUP: overview
+#+PROPERTY: header-args :cache yes :noweb yes :results inline :mkdirp yes :padline yes :async
+#+HTML_DOCTYPE: html5
+#+OPTIONS: toc:2 num:nil html-style:nil html-postamble:nil html-preamble:nil html5-fancy:t
+
+** deps.edn
+#+NAME: deps.edn
+#+begin_src clojure :tangle ./deps.edn
+{:paths
+ ["src" "tests" "resources" "target"]
+
+ :deps 
+ {org.clojure/clojurescript  {:mvn/version "1.10.773"}
+  reagent                    {:mvn/version "1.0.0-alpha2"}
+  com.bhauman/figwheel-main  {:mvn/version "0.2.6"}}
+
+ :aliases
+ {:dev {:main-opts ["-m" "figwheel.main" "--build" "dev" "--repl"]}
+  :prod {:main-opts ["-m" "figwheel.main" "-b" "prod"]}}}
+
+#+end_src
+
+** build-config
+#+NAME: dev.cljs.edn
+#+BEGIN_SRC clojure :tangle ./dev.cljs.edn
+^{:watch-dirs ["src"]
+  :css-dirs ["resources"]}
+{:main baton.app}
+
+#+END_SRC
+
+#+NAME: prod.cljs.edn
+#+BEGIN_SRC clojure :tangle ./prod.cljs.edn
+^{:watch-dirs ["src"]
+  :css-dirs ["resources"]}
+{:main baton.app
+ :optimizations :advanced}
+
+#+END_SRC
+
+** embed
+This is a way to create single file 'embedded' apps.
+#+BEGIN_SRC clojure tangle ./embed
+#!/usr/bin/env bb
+
+(defn base [style script]
+  (str "<!DOCTYPE html>
+<html>
+<head>
+<title>app</title>
+<style>"
+
+style
+
+"</style>
+</head>
+<body>
+<div id=\"root\"></div>
+<script>"
+  
+script
+
+"</script>
+</body>
+</html>"))
+
+(def style (slurp "resources/public/style.css"))
+(def script (slurp "target/public/cljs-out/prod-main.js"))
+
+(spit "out.html" (base style script))
+
+#+END_SRC
+
+* ns
+#+BEGIN_SRC clojure :tangle ./src/baton/core.cljs
+(ns ^:figwheel-hooks baton.core
+  (:require [reagent.dom :as rdom]
+            [goog.events :as events]
+            [reagent.core :as r]
+            [reagent.ratom :refer [reaction]])
+  (:import [goog.events EventType]))
+
+#+END_SRC
+
+* scratch
+** drawable
+I had trouble with .-offsetX and .-offsetY. It turns out that React components don't have those properties, you have to first use -nativeEvent where they DO exist. Found this out here:
+
+[[https://stackoverflow.com/a/31520106]]
+
+I struggled for a minute with making components that create their own local state. Using the following link, I was able to learn about 'form-2' components which return a function. You can use that to 'wrap' them in a let that creates the local state.
+
+[[https://timothypratley.blogspot.com/2017/01/reagent-deep-dive-part-2-lifecycle-of.html]]
+
+To fix:
+drawable local state not using a unique key... should figure that one out.
+
+Big help from
+[[https://github.com/borkdude/draggable-button-in-reagent/blob/master/src-cljs/drag/main.cljs]]
+
+for the dragging stuff.
+
+*** utils
+ Get parent offset gets the x and y positions as well as width and height of the parent that a draggable component sits inside. These values are used to correctly move the draggable as the mouse moves and to prevent dragging beyond the bounds of the parent.
+
+#+BEGIN_SRC clojure :tangle ./src/baton/core.cljs
+(defn to-pts
+  [coords]
+  (into [] 
+        (for [pt coords]
+          [(:x @pt) (:y @pt)])))
+
+(defn coords-exist?
+  [coords [x y]]
+  (not (empty? 
+        (filter #(and (= (:x %) x) (= (:y %) y)) coords))))
+
+(defn get-ancestor [node target-type]
+  (if-not (= (.. node -nodeName) target-type)
+    (recur (.. node -parentNode) target-type)
+    node))
+
+(defn get-parent-offset [e]
+  (let [parent (.getBoundingClientRect
+                (get-ancestor (.. e -target) "svg"))
+        target (.getBoundingClientRect (.. e -target))
+        x (.-left parent)
+        y (.-top parent)
+        x-max (- (.-width parent) (.-width target))
+        y-max (- (.-height parent) (.-height target))]
+    {:x x
+     :y y
+     :x-max x-max
+     :y-max y-max}))
+
+#+END_SRC
+
+*** handlers
+ I need a clean way to make components that I can optionally turn into draggables. I would ideally want to have a (make-draggable) fn that wraps any normal component. Currently, I assume the draggable component is a direct child of the 'container'. Eg. a circle is just directly in an SVG tag, NOT nested in a group tag. The general (make-draggable component) would need a mechanism for handling this appropriately.
+
+ I also have issues with conflicting handlers between 'containers' and their children. Eg. dragging a point in the drawable SVG causes a new point to be drawn. This prevents proper modification.
+
+#+BEGIN_SRC clojure :tangle ./src/baton/core.cljs
+(defn mouse-move-handler [offset state]
+  (fn [e]
+    (let [sc (:scale @state)
+          x (/ (- (.-clientX e) (:x offset)) sc)
+          y (/ (- (.-clientY e) (:y offset)) sc)]
+      (reset! state {:scale sc
+                     :x (f/clamp x 0 (:x-max offset))
+                     :y (f/clamp y 0 (:y-max offset))}))))
+
+(defn mouse-up-handler [on-move]
+  (fn [e]
+    (events/unlisten js/window EventType.MOUSEMOVE on-move)
+    (events/unlisten js/window EventType.TOUCHMOVE on-move)))
+
+(defn mouse-down-handler [state]
+  (fn [e]
+    (let [offset (get-parent-offset e)
+          on-move (mouse-move-handler offset state)]
+      (events/listen js/window EventType.MOUSEMOVE on-move)
+      (events/listen js/window EventType.TOUCHMOVE on-move)
+      (events/listen js/window EventType.MOUSEUP 
+                     (mouse-up-handler on-move))
+      (events/listen js/window EventType.TOUCHEND 
+                     (mouse-up-handler on-move)))))
+
+#+END_SRC
+
+*** draggable-components
+#+BEGIN_SRC clojure :tangle ./src/baton/core.cljs
+(defn draggable-point [[x y] state]
+  (let [sc (reaction (:scale @state))
+        x-pos (reaction (:x @state))
+        y-pos (reaction (:y @state))]
+    (fn [[x y]]
+      [:<>
+       [:circle {:class ["attn"]
+                 :r (/ 4 @sc)
+                 :cx @x-pos
+                 :cy @y-pos
+                 :on-touch-start (mouse-down-handler state)
+                 :on-mouse-down (mouse-down-handler state)}]
+       (label [(+ @x-pos (/ 6 @sc)) (+ @y-pos (/ 3 @sc))]
+              @sc 
+              (str [(f/round @x-pos 3) (f/round @y-pos 3)]))])))
+
+#+END_SRC
+
+*** draw-event
+This function runs when a click event occurs on the SVG of the drawable component.
+
+#+BEGIN_SRC clojure :tangle ./src/baton/core.cljs
+(defn draw-event [state]
+  (fn [e]
+    (let [sc (:scale @state)
+          target (.. e -target -nodeName)
+          x (/ (.. e -nativeEvent -offsetX) sc)
+          y (/ (.. e -nativeEvent -offsetY) sc)]
+      (when-not (or 
+                 (coords-exist? @state [x y])
+                 (not (= (str target) "svg")))
+        (swap! state update :pts
+               #(conj % ^{:key (gensym "key-")} 
+                      (r/atom {:scale sc :x x :y y})))))))
+#+END_SRC
+
+*** drawable
+This is the component that is the drawing canvas.
+I need to pull out the components like buttons and text inputs.
+I also need to turn inline event functions into their own functions (like I did with draw-event) to keep the component cleaner. 
+
+In general, I should re-work the state approach and clean up the architecture so that plain svg components can be quickly 'wired up' without copy-paste messes.
+
+NOTE: When I add ^{:key (gensym "key-"} meta-data inside the for that creates draggable points, dragging points on my iPad (touch events) behave incorrectly. Without the meta data, dragging works as expected. I need to figure out why that is.
+
+#+BEGIN_SRC clojure :tangle ./src/baton/core.cljs
+(defn drawable [w h]
+  (let [state (r/atom {:scale 80
+                       :pts []})] 
+    (fn [w h]
+      [:<>
+       [:svg
+        {:style {:touch-action "none"}
+         :width w
+         :height h
+         :viewBox (str "-1 -1 " w " " h)
+         :xmlns "http://www.w3.org/2000/svg"
+         :on-click (draw-event state)}
+        [:g {:transform (str "scale(" (:scale @state) ")")}
+         (svg/polygon (to-pts (:pts @state)))
+         #_(fabric/sq 1)
+         (doall
+          (for [pt (:pts @state)]
+            ^{:key (gensym "key-")} ;; messes with touch-events??
+            [draggable-point [(:x @pt) 
+                              (:y @pt)] pt]))]]
+       [:div
+        [:button {:on-click 
+                  (fn [e] 
+                    (swap! state assoc :pts []))} "clear"]
+        #_[:div
+         "scale: "
+         [:input {:type "text"
+                  :value (:scale @state)
+                  :on-change 
+                  (fn [e]
+                    (swap! state assoc :scale (.. e -target -value)))}]]
+        #_[:pre 
+         [:code "coords: " (str (to-pts (:pts @state)))]]]])))
+
+#+END_SRC
+** tool-spawner
+#+BEGIN_SRC clojure :tangle ./src/baton/core.cljs
+(defn spawner []
+  (let [items (r/atom [])]
+    (fn []
+      [:div
+       (when-not (empty? @items) (into [:<>] @items))
+       [:button
+        {:on-click
+         (fn [e]
+           (swap! items #(conj % ^{:key (gensym "key-")} [drawable 300 300])))}
+         "+ draw"]])))
+
+#+END_SRC
+
+* inputs
+#+BEGIN_SRC clojure :tangle ./src/baton/core.cljs
+(defn textbox [value]
+  [:input {:type "text"
+           :value @value
+           :on-change 
+           #(reset! value (-> % .-target .-value))}])
+
+(defn slider [value min max step]
+  [:input {:type "range"
+           :value @value
+           :min min
+           :max max
+           :step step
+           :on-change
+           #(reset! value (-> % .-target .-value))}])
+
+#+END_SRC
+
+* mount
+#+BEGIN_SRC clojure :tangle ./src/baton/core.cljs
+(defn mount [app]
+  (rdom/render [app] (js/document.getElementById "root")))
+
+#+END_SRC
+
