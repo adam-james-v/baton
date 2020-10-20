@@ -287,6 +287,11 @@ NOTE: When I add ^{:key (gensym "key-"} meta-data inside the for that creates dr
            :on-change
            #(reset! value (-> % .-target .-value))}])
 
+(defn date [value]
+  [:input {:type "date"
+           :value @value
+           :on-change #(reset! value (-> % .-target .-value))}])
+
 #+END_SRC
 
 * mount
@@ -295,4 +300,3 @@ NOTE: When I add ^{:key (gensym "key-"} meta-data inside the for that creates dr
   (rdom/render [app] (js/document.getElementById "root")))
 
 #+END_SRC
-

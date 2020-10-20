@@ -148,5 +148,10 @@
            :on-change
            #(reset! value (-> % .-target .-value))}])
 
+(defn date [value]
+  [:input {:type "date"
+           :value @value
+           :on-change #(reset! value (-> % .-target .-value))}])
+
 (defn mount [app]
   (rdom/render [app] (js/document.getElementById "root")))
